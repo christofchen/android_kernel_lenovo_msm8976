@@ -76,6 +76,14 @@ MODULE_LICENSE("GPLv2");
 #define DT2W_PWRKEY_DUR   60
 #define DT2W_FEATHER     150
 #define DT2W_TIME        600
+#define DT2W_VIBR_DUR_MS  75
+
+/* Values found empirically by tapping on the screen.
+ * Note that the X axis seems to correspond to the short edge
+ * of the screen, and Y to the long edge.
+ */
+#define DT2W_MAX_X      2534
+#define DT2W_MAX_Y      1642
 
 /* Resources */
 int dt2w_switch = DT2W_DEFAULT;
@@ -89,16 +97,25 @@ bool dt2w_scr_suspended = false;
 static struct notifier_block dt2w_lcd_notif;
 #endif
 #endif
-static struct input_dev * doubletap2wake_pwrdev;
+static struct input_dev *doubletap2wake_pwrdev;
+static struct timed_output_dev *doubletap2wake_vibdev;
 static DEFINE_MUTEX(pwrkeyworklock);
 static struct workqueue_struct *dt2w_input_wq;
 static struct work_struct dt2w_input_work;
 
 /* PowerKey setter */
-void doubletap2wake_setdev(struct input_dev * input_device) {
+void doubletap2wake_set_pwrdev(struct input_dev *input_device) {
 	doubletap2wake_pwrdev = input_device;
-	printk(LOGTAG"set doubletap2wake_pwrdev: %s\n", doubletap2wake_pwrdev->name);
+	pr_info("set doubletap2wake_pwrdev: %s\n", doubletap2wake_pwrdev->name);
 }
+EXPORT_SYMBOL(doubletap2wake_set_pwrdev);
+
+void doubletap2wake_set_vibdev(struct timed_output_dev *tdev)
+{
+	doubletap2wake_vibdev = tdev;
+	pr_info("set doubletap2wake_vibdev: %s\n", tdev->name);
+}
+EXPORT_SYMBOL(doubletap2wake_set_vibdev);
 
 /* Read cmdline for dt2w */
 static int __init read_dt2w_cmdline(char *dt2w)
@@ -117,7 +134,8 @@ static int __init read_dt2w_cmdline(char *dt2w)
 __setup("dt2w=", read_dt2w_cmdline);
 
 /* reset on finger release */
-static void doubletap2wake_reset(void) {
+static void doubletap2wake_reset(void)
+{
 	exec_count = true;
 	touch_nr = 0;
 	tap_time_pre = 0;
@@ -126,7 +144,8 @@ static void doubletap2wake_reset(void) {
 }
 
 /* PowerKey work func */
-static void doubletap2wake_presspwr(struct work_struct * doubletap2wake_presspwr_work) {
+static void doubletap2wake_presspwr(struct work_struct *doubletap2wake_presspwr_work)
+{
 	if (!mutex_trylock(&pwrkeyworklock))
 		return;
 	input_event(doubletap2wake_pwrdev, EV_KEY, KEY_POWER, 1);
@@ -141,13 +160,24 @@ static void doubletap2wake_presspwr(struct work_struct * doubletap2wake_presspwr
 static DECLARE_WORK(doubletap2wake_presspwr_work, doubletap2wake_presspwr);
 
 /* PowerKey trigger */
-static void doubletap2wake_pwrtrigger(void) {
-	schedule_work(&doubletap2wake_presspwr_work);
+static void doubletap2wake_pwrtrigger(void)
+{
+	if (doubletap2wake_vibdev)
+		doubletap2wake_vibdev->enable(doubletap2wake_vibdev,
+		                              DT2W_VIBR_DUR_MS);
+	else
+		pr_err(LOGTAG "cannot vibrate, not registered with vibdev");
+
+	if (doubletap2wake_pwrdev)
+		schedule_work(&doubletap2wake_presspwr_work);
+	else
+		pr_err(LOGTAG "cannot inject pwron, not registered with input dev");
 	return;
 }
 
 /* unsigned */
-static unsigned int calc_feather(int coord, int prev_coord) {
+static unsigned int calc_feather(int coord, int prev_coord)
+{
 	int calc_coord = 0;
 	calc_coord = coord-prev_coord;
 	if (calc_coord < 0)
@@ -155,8 +185,21 @@ static unsigned int calc_feather(int coord, int prev_coord) {
 	return calc_coord;
 }
 
+/* Returns zero if tapping is in a valid area,
+ * or -1 if it should be rejected
+ */
+static int reject_edges(int x, int y)
+{
+	if (x >= DT2W_MAX_X / 10 && x <= DT2W_MAX_X * 9 / 10 &&
+	    y >= DT2W_MAX_Y / 10 && y <= DT2W_MAX_Y * 9 / 10)
+		return 0;
+	else
+		return -1;
+}
+
 /* init a new touch */
-static void new_touch(int x, int y) {
+static void new_touch(int x, int y)
+{
 	tap_time_pre = ktime_to_ms(ktime_get());
 	x_pre = x;
 	y_pre = y;
@@ -178,18 +221,17 @@ static void detect_doubletap2wake(int x, int y, bool st)
 		} else {
 			if ((calc_feather(x, x_pre) < DT2W_FEATHER) &&
 			    (calc_feather(y, y_pre) < DT2W_FEATHER) &&
+			    (!reject_edges(x, y)) &&
 			    ((ktime_to_ms(ktime_get())-tap_time_pre) < DT2W_TIME)) {
 				pr_info(LOGTAG"ON\n");
 				exec_count = false;
 				doubletap2wake_pwrtrigger();
 				doubletap2wake_reset();
-                        }
-
+			}
 			else {
 				doubletap2wake_reset();
 				new_touch(x, y);
 			}
-
 		}
 	}
 }
@@ -202,12 +244,12 @@ static void dt2w_input_callback(struct work_struct *unused) {
 	else
 	#endif
 	detect_doubletap2wake(touch_x, touch_y, true);
-
 	return;
 }
 
 static void dt2w_input_event(struct input_handle *handle, unsigned int type,
-				unsigned int code, int value) {
+                             unsigned int code, int value)
+{
 #if DT2W_DEBUG
 	pr_info("doubletap2wake: code: %s|%u, val: %i\n",
 		((code==ABS_MT_POSITION_X) ? "X" :
@@ -277,16 +319,15 @@ static int input_dev_filter(struct input_dev *dev) {
 	}
 }
 
-static int dt2w_input_connect(struct input_handler *handler,
-				struct input_dev *dev, const struct input_device_id *id) {
+static int
+dt2w_input_connect(struct input_handler *handler,
+                   struct input_dev *dev, const struct input_device_id *id)
+{
 	struct input_handle *handle;
 	int error;
 
 	if (input_dev_filter(dev))
 		return -ENODEV;
-
-
-	pr_err("%s: HELLO %s\n", __func__, dev->name);	
 
 	handle = kzalloc(sizeof(struct input_handle), GFP_KERNEL);
 	if (!handle)
@@ -312,9 +353,8 @@ err2:
 	return error;
 }
 
-static void dt2w_input_disconnect(struct input_handle *handle) {
-	pr_err("%s: DISCONNECT\n", __func__);
-	
+static void dt2w_input_disconnect(struct input_handle *handle)
+{
 	input_close_device(handle);
 	input_unregister_handle(handle);
 	kfree(handle);
@@ -352,11 +392,13 @@ static int lcd_notifier_callback(struct notifier_block *this,
 	return 0;
 }
 #else
-static void dt2w_early_suspend(struct early_suspend *h) {
+static void dt2w_early_suspend(struct early_suspend *h)
+{
 	dt2w_scr_suspended = true;
 }
 
-static void dt2w_late_resume(struct early_suspend *h) {
+static void dt2w_late_resume(struct early_suspend *h)
+{
 	dt2w_scr_suspended = false;
 }
 
@@ -371,8 +413,9 @@ static struct early_suspend dt2w_early_suspend_handler = {
 /*
  * SYSFS stuff below here
  */
-static ssize_t dt2w_doubletap2wake_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
+static ssize_t
+dt2w_doubletap2wake_show(struct device *dev,
+                         struct device_attribute *attr, char *buf)
 {
 	size_t count = 0;
 
@@ -381,14 +424,11 @@ static ssize_t dt2w_doubletap2wake_show(struct device *dev,
 	return count;
 }
 
-static ssize_t dt2w_doubletap2wake_dump(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t count)
+static ssize_t
+dt2w_doubletap2wake_dump(struct device *dev, struct device_attribute *attr,
+                         const char *buf, size_t count)
 {
-	if (buf[0] != '0') 
-		dt2w_switch = 1;
-	 else 
-		dt2w_switch = 0;
-		
+	dt2w_switch = (buf[0] != '0');
 	return count;
 }
 

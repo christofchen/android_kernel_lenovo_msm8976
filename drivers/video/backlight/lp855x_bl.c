@@ -17,7 +17,6 @@
 #include <linux/of.h>
 #include <linux/platform_data/lp855x.h>
 #include <linux/pwm.h>
-#include <linux/leds.h>
 
 /* LP8550/1/2/3/6 Registers */
 #define LP855X_BRIGHTNESS_CTRL		0x00
@@ -45,21 +44,7 @@ enum lp855x_brightness_ctrl_mode {
 	REGISTER_BASED,
 };
 
-
-struct lp855x {
-	const char *chipname;
-	struct led_classdev	cdev;//yxw add for test
-	enum lp855x_chip_id chip_id;
-	enum lp855x_brightness_ctrl_mode mode;
-	struct lp855x_device_config *cfg;
-	struct i2c_client *client;
-	struct backlight_device *bl;
-	struct device *dev;
-	struct lp855x_platform_data *pdata;
-	struct pwm_device *pwm;
-};
-
-struct lp855x *bl_info;
+struct lp855x;
 
 /*
  * struct lp855x_device_config
@@ -75,30 +60,21 @@ struct lp855x_device_config {
 	int (*post_init_device)(struct lp855x *);
 };
 
+struct lp855x {
+	const char *chipname;
+	enum lp855x_chip_id chip_id;
+	enum lp855x_brightness_ctrl_mode mode;
+	struct lp855x_device_config *cfg;
+	struct i2c_client *client;
+	struct backlight_device *bl;
+	struct device *dev;
+	struct lp855x_platform_data *pdata;
+	struct pwm_device *pwm;
+};
 
 static int lp855x_write_byte(struct lp855x *lp, u8 reg, u8 data)
 {
 	return i2c_smbus_write_byte_data(lp->client, reg, data);
-}
-//yxw add for test
-static int lp855x_read_byte(struct lp855x *lp,u8 reg)
-{
-	return i2c_smbus_read_byte_data(lp->client,reg);
-}
-//end
-static void lp855x_lcd_bl_set(struct led_classdev *led_cdev,
-			   enum led_brightness value)
-{
-	struct lp855x *lp;
-
-	lp = container_of(led_cdev, struct lp855x, cdev);
-
-	if((value > 0)&&(value < 5)){
-		value = 5;
-	}
-	lp855x_write_byte(lp, lp->cfg->reg_brightness, value);
-
-	return;
 }
 
 static int lp855x_update_bit(struct lp855x *lp, u8 reg, u8 mask, u8 data)
@@ -206,22 +182,13 @@ static int lp855x_configure(struct lp855x *lp)
 			goto err;
 		}
 	}
-	//yxw add
-	//lp855x_update_bit(lp, LP8557_BL_CMD, LP8557_BL_MASK,LP8557_BL_ON);
-	//dev_err(lp->dev, "yxw test++++++++++++1+++++++++\n");
-	//end
+
 	val = pd->initial_brightness;
-	val = 0x80;
 	ret = lp855x_write_byte(lp, lp->cfg->reg_brightness, val);
 	if (ret)
 		goto err;
 
-	val = 0x05;
-	ret = lp855x_write_byte(lp, 0x11, val);
-	if (ret)
-		goto err;
-
-	val = 0x01;
+	val = pd->device_control;
 	ret = lp855x_write_byte(lp, lp->cfg->reg_devicectrl, val);
 	if (ret)
 		goto err;
@@ -359,67 +326,12 @@ static ssize_t lp855x_get_bl_ctl_mode(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "%s\n", strmode);
 }
 
-static ssize_t lp855x_get_cabc_mode(struct device *dev,
-				     struct device_attribute *attr, char *buf)
-{
-	struct lp855x *lp = dev_get_drvdata(dev);
-	char *strmode = NULL;
-	int reg ;
-	reg = lp855x_read_byte(lp,lp->cfg->reg_devicectrl);
-
-	if (reg == 3){
-		strmode = "enable cabc";
-	}else{
-		strmode = "disable cabc";
-	}
-	
-	return scnprintf(buf, PAGE_SIZE, "backlight LP855X [ %s ] .\n", strmode);
-}
-
-static ssize_t lp855x_set_cabc_mode(struct device *dev,
-				   struct device_attribute *attr,
-				   const char *buf, size_t count)
-{
-	int ret = 0;
-	int cabc_auto;
-	u8 val;
-	u8 pre_bl;
-	struct lp855x *lp = bl_info;
-
-	cabc_auto = -1;
-	sscanf(buf, "%d", &cabc_auto);
-
-	pre_bl = lp855x_read_byte(lp, lp->cfg->reg_brightness);
-
-	if (cabc_auto) {
-		lp855x_update_bit(lp, LP8557_BL_CMD, LP8557_BL_MASK,LP8557_BL_OFF);
-		val = 0x03;
-		ret = lp855x_write_byte(lp, lp->cfg->reg_devicectrl, val);
-		if(ret ){
-			printk(KERN_ERR"--lp855x_set_cabc_mode lp855x_write_byte error .\n");
-		}
-
-	} else {
-		lp855x_update_bit(lp, LP8557_BL_CMD, LP8557_BL_MASK,LP8557_BL_OFF);
-		val = 0x01;
-		ret = lp855x_write_byte(lp, lp->cfg->reg_devicectrl, val);
-		if(ret ){
-			printk(KERN_ERR"--lp855x_set_cabc_mode lp855x_write_byte error .\n");
-		}
-	}
-	lp855x_update_bit(lp, LP8557_BL_CMD, LP8557_BL_MASK,LP8557_BL_ON);
-
-	return count;
-}
-
 static DEVICE_ATTR(chip_id, S_IRUGO, lp855x_get_chip_id, NULL);
 static DEVICE_ATTR(bl_ctl_mode, S_IRUGO, lp855x_get_bl_ctl_mode, NULL);
-static DEVICE_ATTR(cabc_mode, 644, lp855x_get_cabc_mode, lp855x_set_cabc_mode);
 
 static struct attribute *lp855x_attributes[] = {
 	&dev_attr_chip_id.attr,
 	&dev_attr_bl_ctl_mode.attr,
-	&dev_attr_cabc_mode.attr,
 	NULL,
 };
 
@@ -484,7 +396,6 @@ static int lp855x_probe(struct i2c_client *cl, const struct i2c_device_id *id)
 	struct lp855x *lp;
 	struct lp855x_platform_data *pdata = cl->dev.platform_data;
 	struct device_node *node = cl->dev.of_node;
-	const char *odm_nanme = "lcd-backlight";
 	int ret;
 
 	if (!pdata) {
@@ -527,19 +438,6 @@ static int lp855x_probe(struct i2c_client *cl, const struct i2c_device_id *id)
 		goto err_dev;
 	}
 
-	lp->cdev.name = odm_nanme;
-	lp->cdev.brightness_set = lp855x_lcd_bl_set;
-	lp->cdev.brightness = LED_OFF;
-	lp->client = cl;
-	bl_info = lp;
-	
-	ret = led_classdev_register(&cl->dev, &lp->cdev);
-	if (ret) {
-		dev_err(&cl->dev, "failed to register lp855x %s\n",
-			lp->chipname);
-		goto err;
-	}
-	
 	ret = sysfs_create_group(&lp->dev->kobj, &lp855x_attr_group);
 	if (ret) {
 		dev_err(lp->dev, "failed to register sysfs. err: %d\n", ret);
@@ -551,8 +449,6 @@ static int lp855x_probe(struct i2c_client *cl, const struct i2c_device_id *id)
 
 err_sysfs:
 	lp855x_backlight_unregister(lp);
-err:
-	led_classdev_unregister(&lp->cdev);
 err_dev:
 	return ret;
 }
@@ -568,30 +464,6 @@ static int lp855x_remove(struct i2c_client *cl)
 
 	return 0;
 }
-
-static void lp855x_shutdown(struct i2c_client *cl)
-{
-	struct lp855x *lp = bl_info;
-	
-	lp855x_update_bit(lp, LP8557_BL_CMD, LP8557_BL_MASK,
-				LP8557_BL_OFF);
-}
-
-static int lp855x_suspend(struct device *dev)
-{
-	struct lp855x *lp = bl_info;
-	return lp855x_update_bit(lp, LP8557_BL_CMD, LP8557_BL_MASK,
-				LP8557_BL_OFF);
-}
-
-static int lp855x_resume(struct device *dev)
-{
-	struct lp855x *lp = bl_info;
-	return lp855x_update_bit(lp, LP8557_BL_CMD, LP8557_BL_MASK,
-				LP8557_BL_ON);
-}
-
-static UNIVERSAL_DEV_PM_OPS(lp855xpm, lp855x_suspend, lp855x_resume, NULL);
 
 static const struct of_device_id lp855x_dt_ids[] = {
 	{ .compatible = "ti,lp8550", },
@@ -619,10 +491,8 @@ static struct i2c_driver lp855x_driver = {
 	.driver = {
 		   .name = "lp855x",
 		   .of_match_table = of_match_ptr(lp855x_dt_ids),
-		   .pm = &lp855xpm,
 		   },
 	.probe = lp855x_probe,
-	.shutdown = lp855x_shutdown,
 	.remove = lp855x_remove,
 	.id_table = lp855x_ids,
 };
